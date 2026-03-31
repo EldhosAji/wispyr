@@ -1,0 +1,144 @@
+/* ═══════════════════════════════════════════════════════
+   Wispyr Design System — globals.css
+   ═══════════════════════════════════════════════════════ */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  /* Typography */
+  --font-sans:  'Geist', system-ui, -apple-system, sans-serif;
+  --font-mono:  'Geist Mono', 'Cascadia Code', 'Consolas', monospace;
+
+  --text-xs:   11px;
+  --text-sm:   12px;
+  --text-base: 13px;
+  --text-md:   14px;
+  --text-lg:   16px;
+  --text-xl:   20px;
+
+  --weight-regular: 400;
+  --weight-medium:  500;
+
+  /* === DARK THEME (default) === */
+
+  /* Elevation system */
+  --bg-base:      #0d0d0d;
+  --bg-surface:   #141414;
+  --bg-elevated:  #1c1c1c;
+  --bg-overlay:   #242424;
+  --bg-hover:     #2a2a2a;
+  --bg-active:    #303030;
+
+  /* Text */
+  --text-primary:   #e8e8e8;
+  --text-secondary: #888888;
+  --text-muted:     #555555;
+  --text-inverse:   #0d0d0d;
+
+  /* Accent — electric blue */
+  --accent:       #3b82f6;
+  --accent-hover: #5b9bff;
+  --accent-muted: #1e3a5f;
+  --accent-text:  #93c5fd;
+
+  /* Semantic */
+  --success:        #22c55e;   --success-muted:  #14532d;
+  --warning:        #f59e0b;   --warning-muted:  #78350f;
+  --danger:         #ef4444;   --danger-muted:   #7f1d1d;
+  --info:           #3b82f6;   --info-muted:     #1e3a5f;
+  --purple:         #a855f7;   --purple-muted:   #4a1d96;
+
+  /* Permission level colors */
+  --perm-read:        #22c55e;
+  --perm-write:       #f59e0b;
+  --perm-destructive: #ef4444;
+  --perm-system:      #a855f7;
+
+  /* Borders */
+  --border:        rgba(255,255,255,0.08);
+  --border-strong: rgba(255,255,255,0.16);
+  --border-accent: rgba(59,130,246,0.4);
+
+  /* Shadows */
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.4);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.5);
+  --shadow-lg: 0 8px 24px rgba(0,0,0,0.6);
+
+  /* Radius */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+
+  /* Spacing */
+  --space-1: 4px;   --space-2: 8px;   --space-3: 12px;
+  --space-4: 16px;  --space-5: 20px;  --space-6: 24px;
+  --space-8: 32px;
+
+  /* Transitions */
+  --t-fast: 120ms ease;
+  --t-base: 200ms ease;
+  --t-slow: 300ms ease;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg-base:        #f5f5f5;
+    --bg-surface:     #ffffff;
+    --bg-elevated:    #fafafa;
+    --bg-overlay:     #ffffff;
+    --bg-hover:       #f0f0f0;
+    --bg-active:      #e8e8e8;
+    --text-primary:   #111111;
+    --text-secondary: #666666;
+    --text-muted:     #999999;
+    --border:         rgba(0,0,0,0.08);
+    --border-strong:  rgba(0,0,0,0.16);
+  }
+}
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  color: var(--text-primary);
+  background: var(--bg-base);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::selection {
+  background: var(--accent-muted);
+  color: var(--accent-text);
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--bg-overlay);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--bg-hover);
+}
+
+/* Utility animations */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}

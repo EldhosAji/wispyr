@@ -1,0 +1,13 @@
+{
+  "name": "wispyr",
+  "private": true,
+  "version": "0.1.0",
+  "description": "The open-source AI agent that non-developers actually finish installing.",
+  "license": "MIT",
+  "scripts": {
+    "dev": "node apps/desktop/scripts/dev.js",
+    "build": "cd apps/desktop && npx electron-vite build",
+    "build:win": "cd apps/desktop && npx electron-vite build && npx electron-builder --win",
+    "clean": "cd apps/desktop && rm -rf out dist"
+  }
+}

@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+out/
+*.exe
+*.dmg
+*.zip
+
+# Turborepo
+.turbo/
+
+# Environment
+.env
+.env.*
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code
+.claude/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Package manager lock (desktop app uses its own)
+# Keep apps/desktop/package-lock.json
