@@ -5,11 +5,15 @@ import * as auditStore from '../store/audit.store'
 import * as tasksStore from '../store/tasks.store'
 import * as pluginsStore from '../store/plugins.store'
 import * as settingsStore from '../store/settings.store'
-import { readFileSync, existsSync, readdirSync, statSync } from 'fs'
-import { join, extname, basename } from 'path'
+import { readFileSync, existsSync } from 'fs'
+import { join, basename } from 'path'
 import https from 'https'
 import http from 'http'
-import { planTask } from '../agent/task-parser'
+import { initializeAgent } from '../agent/init'
+import { runAgent, cleanupTask, type AgentEvent } from '../agent/engine'
+import { fallbackParse } from '../agent/task-parser'
+import { getTaskCost, getSessionCost, formatCost, formatTokens } from '../agent/cost-tracker'
+import { getTool } from '../agent/tool-registry'
 import * as fsSkill from '../skills/filesystem.skill'
 import * as fileHandlers from '../skills/filehandlers'
 
@@ -28,7 +32,6 @@ async function testProviderConnection(provider: providersStore.ProviderConfig): 
     try {
       const url = new URL(provider.baseUrl)
 
-      // For Ollama, hit /api/tags. For others, just try to connect.
       let testPath = '/'
       const authHeaders: Record<string, string> = {}
 
@@ -90,272 +93,43 @@ async function testProviderConnection(provider: providersStore.ProviderConfig): 
   })
 }
 
-/** Generate a plan using the LLM (or fallback). Returns the plan object. */
-async function generatePlan(
-  task: string,
-  folder: string,
-  taskId: string,
-): Promise<{ id: string; taskId: string; task: string; folder: string; createdAt: string; steps: tasksStore.TaskStep[] }> {
-  const activeProvider = providersStore.getActiveProvider()
+// ─── Legacy step execution (for fallback mode) ───
 
-  tasksStore.updateTask(taskId, { status: 'planning' })
-
-  const steps = await planTask(task, folder, activeProvider)
-
-  const plan = {
-    id: generateId(),
-    taskId,
-    task,
-    folder,
-    createdAt: new Date().toISOString(),
-    steps,
-  }
-
-  tasksStore.updateTask(taskId, { status: 'awaiting_approval', steps: plan.steps })
-
-  auditStore.appendAudit({
-    taskId,
-    skill: 'agent',
-    action: 'plan_created',
-    params: JSON.stringify({ task, folder, stepCount: plan.steps.length, usedLLM: !!activeProvider }),
-    result: JSON.stringify({ planId: plan.id }),
-    permission: 'auto-approved',
-  })
-
-  return plan
-}
-
-// Removed — now using async planTask() from task-parser.ts
-
-/** Execute a single step's action using filesystem skill + rich file handlers */
 async function executeStepAction(step: tasksStore.TaskStep, folder: string, prevOutputs: string[]): Promise<fsSkill.SkillResult> {
   let actionData: any = {}
   try {
     actionData = step.result ? JSON.parse(step.result) : {}
-  } catch { /* parse failed, use empty */ }
+  } catch { /* parse failed */ }
 
   const action = actionData.action || ''
-  // Ensure fileName is just the basename, not a full path (LLM sometimes returns full paths)
   const rawFileName = actionData.fileName || 'output.txt'
   const fileName = basename(rawFileName)
   const filePath = join(folder, fileName)
 
   switch (action) {
-    case 'write_file':
-    case 'write_excel':
-    case 'write_docx':
-    case 'write_pdf':
-    case 'write_pptx':
-    case 'write_csv':
-    case 'write_zip':
-    case 'write_yaml': {
-      // Route to rich handler for binary/structured types
+    case 'write_file': {
       if (fileHandlers.isRichFileType(fileName)) {
-        // For rich files, actionData should contain structured data from the LLM
-        const richData = actionData.data || actionData
-        return await fileHandlers.writeRichFile(filePath, richData)
+        return await fileHandlers.writeRichFile(filePath, actionData.data || actionData)
       }
-      // Plain text
       return fsSkill.writeFile(folder, fileName, actionData.content || '')
     }
-
     case 'read_file': {
       if (fileHandlers.isRichFileType(fileName)) {
         return await fileHandlers.readRichFile(filePath)
       }
       return fsSkill.readFile(folder, fileName)
     }
-
-    case 'list_dir':
-      return fsSkill.listDir(folder)
-
-    case 'create_dir':
-      return fsSkill.createDir(folder, actionData.dirName || 'new_folder')
-
-    case 'delete_file':
-      return fsSkill.deleteFile(folder, fileName)
-
-    case 'move_file':
-      return fsSkill.moveFile(folder, actionData.from || '', actionData.to || '')
-
-    case 'copy_file':
-      return fsSkill.copyFile(folder, actionData.from || '', actionData.to || '')
-
-    case 'search_files':
-      return fsSkill.searchFiles(folder, actionData.pattern || '')
-
-    case 'organise':
-      return fsSkill.organiseFolder(folder)
-
-    case 'append_file':
-      return fsSkill.appendFile(folder, fileName, actionData.content || '')
-
-    case 'write_summary': {
-      const summaryContent = [
-        `# Folder Summary`,
-        ``,
-        `Folder: ${folder}`,
-        `Generated: ${new Date().toISOString()}`,
-        ``,
-        ...prevOutputs.map((o, i) => `## Step ${i + 1}\n${o}\n`),
-      ].join('\n')
-      return fsSkill.writeFile(folder, 'summary.md', summaryContent)
-    }
-
-    case 'generic':
-      return fsSkill.listDir(folder)
-
-    default: {
-      // Try to infer from filename extension
-      if (fileHandlers.isRichFileType(fileName) && actionData.data) {
-        return await fileHandlers.writeRichFile(filePath, actionData.data)
-      }
-      const skill = step.skills[0] || ''
-      if (skill.includes('list_dir')) return fsSkill.listDir(folder)
-      if (skill.includes('read_file')) {
-        if (fileHandlers.isRichFileType(fileName)) return await fileHandlers.readRichFile(filePath)
-        return fsSkill.readFile(folder, fileName)
-      }
-      if (skill.includes('write_file')) return fsSkill.writeFile(folder, fileName, actionData.content || '')
-      if (skill.includes('search')) return fsSkill.searchFiles(folder, actionData.pattern || '*')
-
-      return { success: true, log: `Executed: ${step.title}\nFolder: ${folder}`, result: step.description }
-    }
+    case 'list_dir': return fsSkill.listDir(folder)
+    case 'create_dir': return fsSkill.createDir(folder, actionData.dirName || 'new_folder')
+    case 'delete_file': return fsSkill.deleteFile(folder, fileName)
+    case 'move_file': return fsSkill.moveFile(folder, actionData.from || '', actionData.to || '')
+    case 'copy_file': return fsSkill.copyFile(folder, actionData.from || '', actionData.to || '')
+    case 'search_files': return fsSkill.searchFiles(folder, actionData.pattern || '')
+    case 'organise': return fsSkill.organiseFolder(folder)
+    case 'append_file': return fsSkill.appendFile(folder, fileName, actionData.content || '')
+    default:
+      return { success: true, log: `Executed: ${step.title}`, result: step.description }
   }
-}
-
-async function executeApprovedPlan(taskId: string, steps: tasksStore.TaskStep[]): Promise<void> {
-  const mainWindow = getMainWindow()
-  if (!mainWindow) return
-
-  const task = tasksStore.getTask(taskId)
-  const folder = task?.folder || ''
-  const taskDescription = task?.description || ''
-
-  tasksStore.updateTask(taskId, { status: 'running', steps })
-  mainWindow.webContents.send('agent:status', { taskId, status: 'running' })
-
-  const stepOutputs: string[] = []
-  let hasError = false
-
-  for (let i = 0; i < steps.length; i++) {
-    const step = steps[i]
-
-    // Check cancellation
-    const currentTask = tasksStore.getTask(taskId)
-    if (currentTask?.status === 'cancelled') {
-      mainWindow.webContents.send('agent:complete', {
-        taskId, success: false, steps, startedAt: currentTask.createdAt,
-        completedAt: new Date().toISOString(), error: 'Cancelled by user',
-      })
-      return
-    }
-
-    // Mark step running
-    step.status = 'running'
-    step.startedAt = new Date().toISOString()
-    step.log = `Executing: ${step.title}...`
-    // Clear the action data from result (was used for planning)
-    const actionJson = step.result
-    step.result = undefined
-    tasksStore.updateTask(taskId, { steps })
-    mainWindow.webContents.send('agent:step', { taskId, stepIndex: i, step })
-    // Restore for execution
-    step.result = actionJson
-
-    // Permission check
-    if (step.permissionLevel !== 'read_only') {
-      mainWindow.webContents.send('permission:request', {
-        id: generateId(),
-        taskId,
-        stepId: step.id,
-        action: step.skills[0] || 'unknown',
-        level: step.permissionLevel,
-        humanDescription: `${step.title}: ${step.description}`,
-        details: { step: i + 1, total: steps.length },
-      })
-      const approved = await waitForPermission(step.id)
-
-      auditStore.appendAudit({
-        taskId,
-        skill: step.skills[0]?.split('.')[0] || 'agent',
-        action: step.skills[0] || step.title,
-        params: JSON.stringify({ description: step.description }),
-        permission: approved ? 'approved' : 'denied',
-      })
-
-      if (!approved) {
-        step.status = 'skipped'
-        step.completedAt = new Date().toISOString()
-        step.log = `⊘ Skipped: permission denied by user`
-        step.result = 'Skipped'
-        tasksStore.updateTask(taskId, { steps })
-        mainWindow.webContents.send('agent:step', { taskId, stepIndex: i, step })
-        continue
-      }
-    } else {
-      auditStore.appendAudit({
-        taskId,
-        skill: step.skills[0]?.split('.')[0] || 'agent',
-        action: step.skills[0] || step.title,
-        params: JSON.stringify({ description: step.description }),
-        permission: 'auto-approved',
-      })
-    }
-
-    // ─── REAL EXECUTION ───
-    await sleep(200)
-    const output = await executeStepAction(step, folder, stepOutputs)
-
-    step.completedAt = new Date().toISOString()
-    step.log = output.log
-    step.result = output.result
-
-    if (output.success) {
-      step.status = 'success'
-      stepOutputs.push(output.log)
-    } else {
-      step.status = 'error'
-      step.error = output.error
-      hasError = true
-    }
-
-    tasksStore.updateTask(taskId, { steps })
-    mainWindow.webContents.send('agent:step', { taskId, stepIndex: i, step })
-  }
-
-  // Completion — consider task successful if at least one write step succeeded
-  const completedSteps = steps.filter(s => s.status === 'success').length
-  const skippedSteps = steps.filter(s => s.status === 'skipped').length
-  const errorSteps = steps.filter(s => s.status === 'error').length
-  const completedAt = new Date().toISOString()
-
-  // A task is "successful" if any write/create step completed, even if read/search steps failed
-  const writeStepsSucceeded = steps.some(s => s.status === 'success' && s.permissionLevel !== 'read_only')
-  const allFailed = completedSteps === 0
-  const taskSuccess = !allFailed && (writeStepsSucceeded || !hasError)
-
-  const summaryLines = [
-    `Task: "${taskDescription}"`,
-    `Folder: ${folder}`,
-    `Steps: ${completedSteps} completed, ${skippedSteps} skipped, ${errorSteps} errors, ${steps.length} total`,
-    '',
-    '── Results ──',
-  ]
-  for (const s of steps) {
-    const icon = s.status === 'success' ? '✓' : s.status === 'skipped' ? '⊘' : '✗'
-    summaryLines.push(`${icon} ${s.title}: ${s.result || s.status}`)
-  }
-
-  const finalStatus = taskSuccess ? 'completed' : 'failed'
-  tasksStore.updateTask(taskId, { status: finalStatus, completedAt })
-  mainWindow.webContents.send('agent:complete', {
-    taskId, success: taskSuccess, steps,
-    startedAt: task?.createdAt,
-    completedAt,
-    summary: summaryLines.join('\n'),
-  })
-  mainWindow.webContents.send('agent:status', { taskId, status: finalStatus })
 }
 
 // Permission response tracking
@@ -364,33 +138,36 @@ const pendingPermissions = new Map<string, { resolve: (approved: boolean) => voi
 function waitForPermission(stepId: string): Promise<boolean> {
   return new Promise((resolve) => {
     pendingPermissions.set(stepId, { resolve })
-    // Auto-timeout after 60s
     setTimeout(() => {
       if (pendingPermissions.has(stepId)) {
         pendingPermissions.delete(stepId)
         resolve(false)
       }
-    }, 60000)
+    }, 120000)
   })
 }
 
-// Plan approval tracking
-const pendingPlanApprovals = new Map<string, { resolve: (data: { approved: boolean; steps?: any[] }) => void }>()
-
-function waitForPlanApproval(taskId: string): Promise<{ approved: boolean; steps?: any[] }> {
-  return new Promise((resolve) => {
-    pendingPlanApprovals.set(taskId, { resolve })
-  })
-}
+// Active agent abort controllers
+const activeAgents = new Map<string, AbortController>()
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 export function registerAllIpcHandlers(_mainWindow: BrowserWindow | null): void {
-  // ─── Agent ───
+  // Initialize the agent tool registry on startup
+  initializeAgent()
+
+  // ═══════════════════════════════════════════════
+  // AGENT (new agentic engine)
+  // ═══════════════════════════════════════════════
+
   ipcMain.handle('agent:run', async (_event, task: string, folder: string) => {
     const taskId = generateId()
+    const mainWindow = getMainWindow()
+    const activeProvider = providersStore.getActiveProvider()
+
+    // Create task record
     const newTask: tasksStore.Task = {
       id: taskId,
       description: task,
@@ -409,38 +186,260 @@ export function registerAllIpcHandlers(_mainWindow: BrowserWindow | null): void 
       permission: 'auto-approved',
     })
 
-    // Generate plan (calls LLM — may take a few seconds)
-    // We AWAIT this so the renderer gets the plan in the response
-    const plan = await generatePlan(task, folder, taskId)
+    // If no provider, use fallback parser
+    if (!activeProvider) {
+      const steps = fallbackParse(task)
+      tasksStore.updateTask(taskId, { status: 'awaiting_approval', steps })
+      return {
+        taskId,
+        mode: 'legacy',
+        plan: { id: generateId(), taskId, task, folder, createdAt: new Date().toISOString(), steps },
+      }
+    }
 
-    // Return the plan to the renderer — it will show plan preview
-    return { taskId, plan }
+    // Use the new agent engine
+    const abortController = new AbortController()
+    activeAgents.set(taskId, abortController)
+
+    tasksStore.updateTask(taskId, { status: 'running' })
+    if (mainWindow) {
+      mainWindow.webContents.send('agent:status', { taskId, status: 'running' })
+    }
+
+    // Return taskId first, then start agent after a microtask
+    // so the renderer has time to set up the stream listener
+    setTimeout(() => {
+    runAgent({
+      taskId,
+      folder,
+      provider: activeProvider,
+      message: task,
+      stream: true,
+      maxTurns: 15,
+      abortSignal: abortController.signal,
+      onEvent: (event: AgentEvent) => {
+        console.log(`[IPC] Agent event: type=${event.type}, taskId=${taskId}, text=${event.text?.substring(0, 50) || ''}, error=${event.error || ''}`)
+        if (!mainWindow) {
+          console.log(`[IPC] WARNING: mainWindow is null, cannot send event`)
+          return
+        }
+
+        switch (event.type) {
+          case 'thinking':
+            mainWindow.webContents.send('agent:stream', { taskId, type: 'thinking' })
+            break
+
+          case 'text_delta':
+            mainWindow.webContents.send('agent:stream', { taskId, type: 'text_delta', text: event.text })
+            break
+
+          case 'text_done':
+            mainWindow.webContents.send('agent:stream', { taskId, type: 'text_done', text: event.text })
+            break
+
+          case 'tool_start':
+            mainWindow.webContents.send('agent:stream', {
+              taskId, type: 'tool_start',
+              toolCall: event.toolCall,
+            })
+            break
+
+          case 'tool_result':
+            mainWindow.webContents.send('agent:stream', {
+              taskId, type: 'tool_result',
+              toolResult: event.toolResult,
+            })
+
+            // Also update task steps for history
+            if (event.toolResult) {
+              const currentTask = tasksStore.getTask(taskId)
+              const steps = currentTask?.steps || []
+              steps.push({
+                id: event.toolResult.toolCallId,
+                title: event.toolResult.name || 'Tool',
+                description: event.toolResult.result.log.substring(0, 100),
+                skills: [event.toolResult.name],
+                permissionLevel: event.toolResult.permissionLevel,
+                status: event.toolResult.result.success ? 'success' : 'error',
+                result: event.toolResult.result.result,
+                log: event.toolResult.result.log,
+                error: event.toolResult.result.error,
+                completedAt: new Date().toISOString(),
+              })
+              tasksStore.updateTask(taskId, { steps })
+            }
+            break
+
+          case 'permission_needed':
+            mainWindow.webContents.send('permission:request', {
+              id: generateId(),
+              taskId,
+              stepId: event.toolCall?.id || generateId(),
+              action: event.toolCall?.name || 'unknown',
+              level: getTool(event.toolCall?.name || '')?.permissionLevel || 'write',
+              humanDescription: `${event.toolCall?.name}: ${JSON.stringify(event.toolCall?.arguments || {}).substring(0, 200)}`,
+              details: event.toolCall?.arguments,
+            })
+            break
+
+          case 'cost_update':
+            mainWindow.webContents.send('agent:stream', {
+              taskId, type: 'cost_update',
+              cost: getTaskCost(taskId),
+            })
+            break
+
+          case 'error':
+            mainWindow.webContents.send('agent:stream', { taskId, type: 'error', error: event.error })
+            break
+
+          case 'task_complete':
+            tasksStore.updateTask(taskId, { status: 'completed', completedAt: new Date().toISOString() })
+            mainWindow.webContents.send('agent:stream', {
+              taskId, type: 'task_complete',
+              text: event.text,
+              cost: getTaskCost(taskId),
+            })
+            mainWindow.webContents.send('agent:status', { taskId, status: 'completed' })
+            activeAgents.delete(taskId)
+            break
+
+          case 'compacting':
+            mainWindow.webContents.send('agent:stream', { taskId, type: 'compacting' })
+            break
+
+          case 'skill_generating':
+            mainWindow.webContents.send('agent:stream', { taskId, type: 'skill_generating', text: event.text })
+            break
+        }
+      },
+      onPermission: async (toolCall, level) => {
+        return await waitForPermission(toolCall.id)
+      },
+    }).catch((err) => {
+      tasksStore.updateTask(taskId, { status: 'failed', error: err.message })
+      if (mainWindow) {
+        mainWindow.webContents.send('agent:stream', { taskId, type: 'error', error: err.message })
+        mainWindow.webContents.send('agent:status', { taskId, status: 'failed' })
+      }
+      activeAgents.delete(taskId)
+    })
+    }, 50) // Small delay to let renderer set up stream listener
+
+    return { taskId, mode: 'agent' }
+  })
+
+  // ─── Follow-up message (multi-turn) ───
+  ipcMain.handle('agent:followup', async (_event, taskId: string, message: string) => {
+    const mainWindow = getMainWindow()
+    const activeProvider = providersStore.getActiveProvider()
+    const task = tasksStore.getTask(taskId)
+
+    if (!activeProvider || !task) {
+      return { success: false, error: 'No active provider or task not found' }
+    }
+
+    const abortController = new AbortController()
+    activeAgents.set(taskId, abortController)
+    tasksStore.updateTask(taskId, { status: 'running' })
+
+    runAgent({
+      taskId,
+      folder: task.folder,
+      provider: activeProvider,
+      message,
+      stream: true,
+      isFollowUp: true,
+      abortSignal: abortController.signal,
+      onEvent: (event: AgentEvent) => {
+        if (!mainWindow) return
+        // Same event handling as agent:run
+        switch (event.type) {
+          case 'text_delta':
+            mainWindow.webContents.send('agent:stream', { taskId, type: 'text_delta', text: event.text })
+            break
+          case 'text_done':
+            mainWindow.webContents.send('agent:stream', { taskId, type: 'text_done', text: event.text })
+            break
+          case 'tool_start':
+            mainWindow.webContents.send('agent:stream', { taskId, type: 'tool_start', toolCall: event.toolCall })
+            break
+          case 'tool_result':
+            mainWindow.webContents.send('agent:stream', { taskId, type: 'tool_result', toolResult: event.toolResult })
+            break
+          case 'permission_needed':
+            mainWindow.webContents.send('permission:request', {
+              id: generateId(), taskId, stepId: event.toolCall?.id || generateId(),
+              action: event.toolCall?.name || 'unknown',
+              level: getTool(event.toolCall?.name || '')?.permissionLevel || 'write',
+              humanDescription: `${event.toolCall?.name}: ${JSON.stringify(event.toolCall?.arguments || {}).substring(0, 200)}`,
+              details: event.toolCall?.arguments,
+            })
+            break
+          case 'cost_update':
+            mainWindow.webContents.send('agent:stream', { taskId, type: 'cost_update', cost: getTaskCost(taskId) })
+            break
+          case 'error':
+            mainWindow.webContents.send('agent:stream', { taskId, type: 'error', error: event.error })
+            break
+          case 'task_complete':
+            tasksStore.updateTask(taskId, { status: 'completed', completedAt: new Date().toISOString() })
+            mainWindow.webContents.send('agent:stream', { taskId, type: 'task_complete', text: event.text, cost: getTaskCost(taskId) })
+            activeAgents.delete(taskId)
+            break
+        }
+      },
+      onPermission: async (toolCall, level) => {
+        return await waitForPermission(toolCall.id)
+      },
+    }).catch((err) => {
+      if (mainWindow) {
+        mainWindow.webContents.send('agent:stream', { taskId, type: 'error', error: err.message })
+      }
+      activeAgents.delete(taskId)
+    })
+
+    return { success: true }
   })
 
   ipcMain.handle('agent:cancel', async (_event, taskId: string) => {
+    const controller = activeAgents.get(taskId)
+    if (controller) {
+      controller.abort()
+      activeAgents.delete(taskId)
+    }
     tasksStore.updateTask(taskId, { status: 'cancelled' })
+    cleanupTask(taskId)
     const mainWindow = getMainWindow()
     if (mainWindow) {
       mainWindow.webContents.send('agent:status', { taskId, status: 'cancelled' })
     }
     auditStore.appendAudit({
-      taskId,
-      skill: 'agent',
-      action: 'task_cancelled',
-      params: JSON.stringify({ taskId }),
-      permission: 'auto-approved',
+      taskId, skill: 'agent', action: 'task_cancelled',
+      params: JSON.stringify({ taskId }), permission: 'auto-approved',
     })
     return { success: true }
   })
 
-  // ─── Plan ───
+  // ─── Cost ───
+  ipcMain.handle('cost:task', async (_event, taskId: string) => {
+    return getTaskCost(taskId)
+  })
+
+  ipcMain.handle('cost:session', async () => {
+    return getSessionCost()
+  })
+
+  // ═══════════════════════════════════════════════
+  // PLAN (legacy — kept for fallback mode)
+  // ═══════════════════════════════════════════════
+
   ipcMain.handle('plan:approve', async (_event, taskId: string, editedSteps?: any[]) => {
     const currentTask = tasksStore.getTask(taskId)
     const steps = editedSteps || currentTask?.steps || []
 
-    // Start execution in background — don't block the IPC response
-    executeApprovedPlan(taskId, steps)
-
+    // Execute via legacy path
+    executeLegacyPlan(taskId, steps)
     return { success: true }
   })
 
@@ -459,50 +458,41 @@ export function registerAllIpcHandlers(_mainWindow: BrowserWindow | null): void 
     return { success: true }
   })
 
-  // ─── Providers ───
+  // ═══════════════════════════════════════════════
+  // PROVIDERS
+  // ═══════════════════════════════════════════════
+
   ipcMain.handle('providers:list', async () => {
     const providers = providersStore.getProvidersSafe()
     const activeId = providersStore.getActiveProviderId()
-    return providers.map((p) => ({
-      ...p,
-      isActive: p.id === activeId,
-    }))
+    return providers.map((p) => ({ ...p, isActive: p.id === activeId }))
   })
 
   ipcMain.handle('providers:add', async (_event, provider: any) => {
     const config: providersStore.ProviderConfig = {
-      id: generateId(),
-      name: provider.name,
-      type: provider.type,
-      baseUrl: provider.baseUrl,
-      model: provider.model,
+      id: generateId(), name: provider.name, type: provider.type,
+      baseUrl: provider.baseUrl, model: provider.model,
       apiKey: provider.apiKey || undefined,
       customHeaders: provider.customHeaders || undefined,
       fallbackPriority: provider.fallbackPriority,
     }
     providersStore.addProvider(config)
-
     auditStore.appendAudit({
-      skill: 'providers',
-      action: 'provider_added',
+      skill: 'providers', action: 'provider_added',
       params: JSON.stringify({ name: config.name, type: config.type, model: config.model }),
       permission: 'auto-approved',
     })
-
     return { success: true, provider: { ...config, apiKey: undefined, hasApiKey: !!config.apiKey } }
   })
 
   ipcMain.handle('providers:remove', async (_event, id: string) => {
     const provider = providersStore.getProviders().find((p) => p.id === id)
     providersStore.removeProvider(id)
-
     auditStore.appendAudit({
-      skill: 'providers',
-      action: 'provider_removed',
+      skill: 'providers', action: 'provider_removed',
       params: JSON.stringify({ id, name: provider?.name }),
       permission: 'auto-approved',
     })
-
     return { success: true }
   })
 
@@ -520,8 +510,6 @@ export function registerAllIpcHandlers(_mainWindow: BrowserWindow | null): void 
   ipcMain.handle('providers:models', async (_event, id: string) => {
     const provider = providersStore.getProviders().find((p) => p.id === id)
     if (!provider) return []
-
-    // Return some default models based on provider type
     switch (provider.type) {
       case 'ollama': return ['llama3.1', 'llama3.2', 'mistral', 'codellama', 'phi3', 'gemma2']
       case 'openai': return ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-3.5-turbo']
@@ -539,45 +527,32 @@ export function registerAllIpcHandlers(_mainWindow: BrowserWindow | null): void 
     return { ...provider, apiKey: undefined, hasApiKey: !!provider.apiKey, isActive: true }
   })
 
-  // ─── Plugins ───
-  ipcMain.handle('plugins:list', async () => {
-    return pluginsStore.getPlugins()
-  })
+  // ═══════════════════════════════════════════════
+  // PLUGINS
+  // ═══════════════════════════════════════════════
+
+  ipcMain.handle('plugins:list', async () => pluginsStore.getPlugins())
 
   ipcMain.handle('plugins:install', async (_event, nameOrPath: string) => {
     const id = generateId()
     pluginsStore.installPlugin({
-      id,
-      name: nameOrPath.split('/').pop() || nameOrPath,
-      version: '1.0.0',
-      description: `Plugin installed from ${nameOrPath}`,
-      author: 'Community',
-      enabled: true,
-      type: 'skill',
+      id, name: nameOrPath.split('/').pop() || nameOrPath,
+      version: '1.0.0', description: `Plugin installed from ${nameOrPath}`,
+      author: 'Community', enabled: true, type: 'skill',
     })
-
-    auditStore.appendAudit({
-      skill: 'plugins',
-      action: 'plugin_installed',
-      params: JSON.stringify({ source: nameOrPath }),
-      permission: 'auto-approved',
-    })
-
+    auditStore.appendAudit({ skill: 'plugins', action: 'plugin_installed', params: JSON.stringify({ source: nameOrPath }), permission: 'auto-approved' })
     return { success: true, id }
   })
 
   ipcMain.handle('plugins:toggle', async (_event, id: string, enabled: boolean) => {
-    const result = pluginsStore.togglePlugin(id, enabled)
-    return { success: result }
+    return { success: pluginsStore.togglePlugin(id, enabled) }
   })
 
   ipcMain.handle('plugins:remove', async (_event, id: string) => {
-    const result = pluginsStore.removePlugin(id)
-    return { success: result }
+    return { success: pluginsStore.removePlugin(id) }
   })
 
   ipcMain.handle('plugins:discover', async () => {
-    // Mock MCP discovery — check standard locations
     const discovered: any[] = []
     const homedir = app.getPath('home')
     const mcpLocations = [
@@ -585,118 +560,68 @@ export function registerAllIpcHandlers(_mainWindow: BrowserWindow | null): void 
       join(homedir, 'AppData', 'Roaming', 'mcp', 'servers.json'),
       join(homedir, 'AppData', 'Roaming', 'Claude', 'claude_desktop_config.json'),
     ]
-
     for (const loc of mcpLocations) {
       try {
         if (existsSync(loc)) {
           const data = JSON.parse(readFileSync(loc, 'utf-8'))
           const servers = data.mcpServers || data.servers || {}
           for (const [name, config] of Object.entries(servers)) {
-            discovered.push({
-              id: `mcp-${name}`,
-              name: `MCP: ${name}`,
-              source: loc,
-              config,
-            })
+            discovered.push({ id: `mcp-${name}`, name: `MCP: ${name}`, source: loc, config })
           }
         }
-      } catch { /* skip invalid files */ }
+      } catch { /* skip */ }
     }
-
     return discovered
   })
 
-  // ─── Workflows ───
-  ipcMain.handle('workflows:list', async () => {
-    return workflowsStore.getWorkflows()
-  })
+  // ═══════════════════════════════════════════════
+  // WORKFLOWS
+  // ═══════════════════════════════════════════════
+
+  ipcMain.handle('workflows:list', async () => workflowsStore.getWorkflows())
 
   ipcMain.handle('workflows:run', async (_event, id: string, inputs: any) => {
     const workflow = workflowsStore.getWorkflow(id)
     if (!workflow) return { success: false, error: 'Workflow not found' }
-
-    // Update lastRun
     workflowsStore.saveWorkflow({ ...workflow, lastRun: new Date().toISOString() })
-
-    auditStore.appendAudit({
-      skill: 'workflows',
-      action: 'workflow_run',
-      params: JSON.stringify({ workflowId: id, name: workflow.name, inputs }),
-      permission: 'auto-approved',
-    })
-
-    // Trigger agent:run with the workflow as a task
-    const mainWindow = getMainWindow()
-    if (mainWindow) {
-      const taskDescription = `Run workflow: ${workflow.name}${workflow.description ? ' — ' + workflow.description : ''}`
-      const folder = settingsStore.getSettings().defaultFolder || app.getPath('home')
-      mainWindow.webContents.send('workflow:started', { workflowId: id, name: workflow.name })
-    }
-
+    auditStore.appendAudit({ skill: 'workflows', action: 'workflow_run', params: JSON.stringify({ workflowId: id, name: workflow.name, inputs }), permission: 'auto-approved' })
     return { success: true }
   })
 
   ipcMain.handle('workflows:save', async (_event, workflow: any) => {
     const toSave: workflowsStore.Workflow = {
-      id: workflow.id || generateId(),
-      name: workflow.name,
-      description: workflow.description || '',
-      author: workflow.author || 'User',
-      version: workflow.version || '1.0.0',
-      inputs: workflow.inputs || [],
-      steps: workflow.steps || [],
-      createdAt: workflow.createdAt || new Date().toISOString(),
+      id: workflow.id || generateId(), name: workflow.name,
+      description: workflow.description || '', author: workflow.author || 'User',
+      version: workflow.version || '1.0.0', inputs: workflow.inputs || [],
+      steps: workflow.steps || [], createdAt: workflow.createdAt || new Date().toISOString(),
       lastRun: workflow.lastRun,
     }
     workflowsStore.saveWorkflow(toSave)
-
-    auditStore.appendAudit({
-      skill: 'workflows',
-      action: 'workflow_saved',
-      params: JSON.stringify({ id: toSave.id, name: toSave.name }),
-      permission: 'auto-approved',
-    })
-
+    auditStore.appendAudit({ skill: 'workflows', action: 'workflow_saved', params: JSON.stringify({ id: toSave.id, name: toSave.name }), permission: 'auto-approved' })
     return { success: true, workflow: toSave }
   })
 
   ipcMain.handle('workflows:delete', async (_event, id: string) => {
     workflowsStore.deleteWorkflow(id)
-
-    auditStore.appendAudit({
-      skill: 'workflows',
-      action: 'workflow_deleted',
-      params: JSON.stringify({ id }),
-      permission: 'auto-approved',
-    })
-
+    auditStore.appendAudit({ skill: 'workflows', action: 'workflow_deleted', params: JSON.stringify({ id }), permission: 'auto-approved' })
     return { success: true }
   })
 
   ipcMain.handle('workflows:import', async (_event, filePath?: string) => {
     let targetPath = filePath
     if (!targetPath) {
-      const result = await dialog.showOpenDialog({
-        title: 'Import Workflow',
-        filters: [{ name: 'JSON', extensions: ['json'] }],
-        properties: ['openFile'],
-      })
+      const result = await dialog.showOpenDialog({ title: 'Import Workflow', filters: [{ name: 'JSON', extensions: ['json'] }], properties: ['openFile'] })
       if (result.canceled || result.filePaths.length === 0) return { success: false, error: 'Cancelled' }
       targetPath = result.filePaths[0]
     }
-
     try {
       const raw = readFileSync(targetPath!, 'utf-8')
       const data = JSON.parse(raw)
       const workflow: workflowsStore.Workflow = {
-        id: data.id || generateId(),
-        name: data.name || 'Imported Workflow',
-        description: data.description || '',
-        author: data.author || 'Imported',
-        version: data.version || '1.0.0',
-        inputs: data.inputs || [],
-        steps: data.steps || [],
-        createdAt: new Date().toISOString(),
+        id: data.id || generateId(), name: data.name || 'Imported Workflow',
+        description: data.description || '', author: data.author || 'Imported',
+        version: data.version || '1.0.0', inputs: data.inputs || [],
+        steps: data.steps || [], createdAt: new Date().toISOString(),
       }
       workflowsStore.saveWorkflow(workflow)
       return { success: true, workflow }
@@ -705,21 +630,20 @@ export function registerAllIpcHandlers(_mainWindow: BrowserWindow | null): void 
     }
   })
 
-  // ─── Audit ───
-  ipcMain.handle('audit:list', async (_event, filter?: any) => {
-    return auditStore.getAuditEntries(filter)
-  })
+  // ═══════════════════════════════════════════════
+  // AUDIT, TASKS, SETTINGS, FS, WINDOW
+  // ═══════════════════════════════════════════════
+
+  ipcMain.handle('audit:list', async (_event, filter?: any) => auditStore.getAuditEntries(filter))
 
   ipcMain.handle('audit:export', async (_event, format: 'csv' | 'json') => {
     const data = auditStore.exportAudit(format)
-    // Offer save dialog
     const ext = format === 'csv' ? 'csv' : 'json'
     const result = await dialog.showSaveDialog({
       title: `Export Audit Log as ${format.toUpperCase()}`,
       defaultPath: `wispyr-audit-${new Date().toISOString().slice(0, 10)}.${ext}`,
       filters: [{ name: format.toUpperCase(), extensions: [ext] }],
     })
-
     if (!result.canceled && result.filePath) {
       const { writeFileSync } = await import('fs')
       writeFileSync(result.filePath, data, 'utf-8')
@@ -728,48 +652,112 @@ export function registerAllIpcHandlers(_mainWindow: BrowserWindow | null): void 
     return { success: false, data }
   })
 
-  // ─── Tasks ───
-  ipcMain.handle('tasks:list', async () => {
-    return tasksStore.getTasks()
-  })
+  ipcMain.handle('tasks:list', async () => tasksStore.getTasks())
+  ipcMain.handle('tasks:get', async (_event, id: string) => tasksStore.getTask(id))
 
-  ipcMain.handle('tasks:get', async (_event, id: string) => {
-    return tasksStore.getTask(id)
-  })
-
-  // ─── Settings ───
-  ipcMain.handle('settings:get', async () => {
-    return settingsStore.getSettings()
-  })
-
+  ipcMain.handle('settings:get', async () => settingsStore.getSettings())
   ipcMain.handle('settings:update', async (_event, updates: any) => {
     settingsStore.updateSettings(updates)
     return { success: true }
   })
 
-  // ─── Filesystem ───
   ipcMain.handle('fs:pickFolder', async () => {
-    const result = await dialog.showOpenDialog({
-      properties: ['openDirectory'],
-    })
+    const result = await dialog.showOpenDialog({ properties: ['openDirectory'] })
     return result.canceled ? null : result.filePaths[0]
   })
 
-  // ─── Window controls ───
-  ipcMain.handle('window:minimize', async (event) => {
-    BrowserWindow.fromWebContents(event.sender)?.minimize()
-  })
-
+  ipcMain.handle('window:minimize', async (event) => { BrowserWindow.fromWebContents(event.sender)?.minimize() })
   ipcMain.handle('window:maximize', async (event) => {
     const win = BrowserWindow.fromWebContents(event.sender)
-    if (win?.isMaximized()) {
-      win.unmaximize()
-    } else {
-      win?.maximize()
-    }
+    if (win?.isMaximized()) win.unmaximize()
+    else win?.maximize()
   })
+  ipcMain.handle('window:close', async (event) => { BrowserWindow.fromWebContents(event.sender)?.close() })
+}
 
-  ipcMain.handle('window:close', async (event) => {
-    BrowserWindow.fromWebContents(event.sender)?.close()
-  })
+// ═══════════════════════════════════════════════
+// Legacy plan execution (fallback when no LLM)
+// ═══════════════════════════════════════════════
+
+async function executeLegacyPlan(taskId: string, steps: tasksStore.TaskStep[]): Promise<void> {
+  const mainWindow = getMainWindow()
+  if (!mainWindow) return
+
+  const task = tasksStore.getTask(taskId)
+  const folder = task?.folder || ''
+
+  tasksStore.updateTask(taskId, { status: 'running', steps })
+  mainWindow.webContents.send('agent:status', { taskId, status: 'running' })
+
+  const stepOutputs: string[] = []
+  let hasError = false
+
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i]
+    const currentTask = tasksStore.getTask(taskId)
+    if (currentTask?.status === 'cancelled') {
+      mainWindow.webContents.send('agent:complete', { taskId, success: false, steps, error: 'Cancelled by user' })
+      return
+    }
+
+    step.status = 'running'
+    step.startedAt = new Date().toISOString()
+    step.log = `Executing: ${step.title}...`
+    const actionJson = step.result
+    step.result = undefined
+    tasksStore.updateTask(taskId, { steps })
+    mainWindow.webContents.send('agent:step', { taskId, stepIndex: i, step })
+    step.result = actionJson
+
+    if (step.permissionLevel !== 'read_only') {
+      mainWindow.webContents.send('permission:request', {
+        id: generateId(), taskId, stepId: step.id,
+        action: step.skills[0] || 'unknown', level: step.permissionLevel,
+        humanDescription: `${step.title}: ${step.description}`,
+        details: { step: i + 1, total: steps.length },
+      })
+      const approved = await waitForPermission(step.id)
+      auditStore.appendAudit({ taskId, skill: step.skills[0]?.split('.')[0] || 'agent', action: step.skills[0] || step.title, params: JSON.stringify({ description: step.description }), permission: approved ? 'approved' : 'denied' })
+
+      if (!approved) {
+        step.status = 'skipped'
+        step.completedAt = new Date().toISOString()
+        step.log = 'Skipped: permission denied'
+        step.result = 'Skipped'
+        tasksStore.updateTask(taskId, { steps })
+        mainWindow.webContents.send('agent:step', { taskId, stepIndex: i, step })
+        continue
+      }
+    } else {
+      auditStore.appendAudit({ taskId, skill: step.skills[0]?.split('.')[0] || 'agent', action: step.skills[0] || step.title, params: JSON.stringify({ description: step.description }), permission: 'auto-approved' })
+    }
+
+    await sleep(200)
+    const output = await executeStepAction(step, folder, stepOutputs)
+    step.completedAt = new Date().toISOString()
+    step.log = output.log
+    step.result = output.result
+
+    if (output.success) {
+      step.status = 'success'
+      stepOutputs.push(output.log)
+    } else {
+      step.status = 'error'
+      step.error = output.error
+      hasError = true
+    }
+
+    tasksStore.updateTask(taskId, { steps })
+    mainWindow.webContents.send('agent:step', { taskId, stepIndex: i, step })
+  }
+
+  const completedSteps = steps.filter(s => s.status === 'success').length
+  const allFailed = completedSteps === 0
+  const writeStepsSucceeded = steps.some(s => s.status === 'success' && s.permissionLevel !== 'read_only')
+  const taskSuccess = !allFailed && (writeStepsSucceeded || !hasError)
+  const completedAt = new Date().toISOString()
+
+  tasksStore.updateTask(taskId, { status: taskSuccess ? 'completed' : 'failed', completedAt })
+  mainWindow.webContents.send('agent:complete', { taskId, success: taskSuccess, steps, completedAt })
+  mainWindow.webContents.send('agent:status', { taskId, status: taskSuccess ? 'completed' : 'failed' })
 }

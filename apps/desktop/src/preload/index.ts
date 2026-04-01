@@ -4,6 +4,8 @@ const api = {
   agent: {
     run: (task: string, folderId: string) =>
       ipcRenderer.invoke('agent:run', task, folderId),
+    followup: (taskId: string, message: string) =>
+      ipcRenderer.invoke('agent:followup', taskId, message),
     cancel: (taskId: string) =>
       ipcRenderer.invoke('agent:cancel', taskId),
     onStep: (cb: (data: any) => void) => {
@@ -26,6 +28,12 @@ const api = {
       ipcRenderer.on('agent:status', listener)
       return () => { ipcRenderer.removeListener('agent:status', listener) }
     },
+    /** Subscribe to streaming events (text deltas, tool calls, etc.) */
+    onStream: (cb: (data: any) => void) => {
+      const listener = (_: any, d: any) => cb(d)
+      ipcRenderer.on('agent:stream', listener)
+      return () => { ipcRenderer.removeListener('agent:stream', listener) }
+    },
   },
 
   plan: {
@@ -43,6 +51,11 @@ const api = {
     },
     respond: (stepId: string, approved: boolean, remember: boolean) =>
       ipcRenderer.invoke('permission:respond', stepId, approved, remember),
+  },
+
+  cost: {
+    getTask: (taskId: string) => ipcRenderer.invoke('cost:task', taskId),
+    getSession: () => ipcRenderer.invoke('cost:session'),
   },
 
   providers: {

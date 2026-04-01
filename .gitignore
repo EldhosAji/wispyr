@@ -34,3 +34,6 @@ Thumbs.db
 
 # Package manager lock (desktop app uses its own)
 # Keep apps/desktop/package-lock.json
+
+.reference
+.reference/

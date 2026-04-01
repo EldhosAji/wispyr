@@ -33,6 +33,10 @@ function createWindow(): void {
 
   mainWindow.on('ready-to-show', () => {
     mainWindow?.show()
+    // Open DevTools in dev mode (F12 also works)
+    if (process.env.ELECTRON_RENDERER_URL) {
+      mainWindow?.webContents.openDevTools({ mode: 'detach' })
+    }
   })
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {

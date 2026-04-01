@@ -25,7 +25,7 @@ function formatBytes(bytes: number): string {
 // EXCEL (.xlsx, .xls)
 // ═══════════════════════════════════════════════
 
-export async function writeExcel(filePath: string, data: { sheets: Array<{ name: string; headers: string[]; rows: any[][] }> }): Promise<FileResult> {
+export async function writeExcel(filePath: string, data: { sheets: Array<{ name: string; headers?: string[]; rows: any[][] }> }): Promise<FileResult> {
   try {
     const ExcelJS = require('exceljs')
     const workbook = new ExcelJS.Workbook()
@@ -35,8 +35,20 @@ export async function writeExcel(filePath: string, data: { sheets: Array<{ name:
     for (const sheet of data.sheets) {
       const ws = workbook.addWorksheet(sheet.name)
 
+      // If headers not provided, use the first row as headers
+      let headers = sheet.headers
+      let dataRows = sheet.rows || []
+      if (!headers || headers.length === 0) {
+        if (dataRows.length > 0) {
+          headers = dataRows[0].map((v: any) => String(v))
+          dataRows = dataRows.slice(1)
+        } else {
+          headers = ['Column1']
+        }
+      }
+
       // Add headers with styling
-      ws.columns = sheet.headers.map((h: string) => ({
+      ws.columns = headers.map((h: string) => ({
         header: h,
         key: h.toLowerCase().replace(/\s+/g, '_'),
         width: Math.max(h.length + 4, 15),
@@ -52,9 +64,9 @@ export async function writeExcel(filePath: string, data: { sheets: Array<{ name:
       ws.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } }
 
       // Add data rows
-      for (const row of sheet.rows) {
+      for (const row of dataRows) {
         const rowData: Record<string, any> = {}
-        sheet.headers.forEach((h: string, i: number) => {
+        headers.forEach((h: string, i: number) => {
           rowData[h.toLowerCase().replace(/\s+/g, '_')] = row[i]
         })
         ws.addRow(rowData)
@@ -63,7 +75,7 @@ export async function writeExcel(filePath: string, data: { sheets: Array<{ name:
       // Auto-filter
       ws.autoFilter = {
         from: { row: 1, column: 1 },
-        to: { row: 1, column: sheet.headers.length },
+        to: { row: 1, column: headers.length },
       }
     }
 
@@ -392,17 +404,33 @@ export async function writePptx(filePath: string, data: { title?: string; slides
 // CSV (enhanced)
 // ═══════════════════════════════════════════════
 
-export async function writeCsv(filePath: string, data: { headers: string[]; rows: any[][] }): Promise<FileResult> {
+export async function writeCsv(filePath: string, data: any): Promise<FileResult> {
   try {
-    const { stringify } = require('csv-stringify/sync')
-    const output = stringify([data.headers, ...data.rows])
+    let output: string
+
+    // Handle plain text CSV content (string passed directly)
+    if (typeof data === 'string') {
+      output = data
+    } else if (data.headers && data.rows) {
+      // Structured data with headers and rows
+      const { stringify } = require('csv-stringify/sync')
+      output = stringify([data.headers, ...data.rows])
+    } else if (data.headers && !data.rows) {
+      // Headers only, no rows
+      output = data.headers.join(',') + '\n'
+    } else {
+      // Fallback: stringify whatever we got
+      output = typeof data.content === 'string' ? data.content : JSON.stringify(data, null, 2)
+    }
+
     writeFileSync(filePath, output, 'utf-8')
     const stat = statSync(filePath)
 
+    const lines = output.split('\n').filter(l => l.trim())
     return {
       success: true,
-      log: `Created CSV: ${filePath}\nSize: ${formatBytes(stat.size)}\nHeaders: ${data.headers.join(', ')}\nRows: ${data.rows.length}\n\n── Preview ──\n${output.substring(0, 500)}`,
-      result: `CSV created: ${data.rows.length} rows × ${data.headers.length} columns (${formatBytes(stat.size)})`,
+      log: `Created CSV: ${filePath}\nSize: ${formatBytes(stat.size)}\nLines: ${lines.length}\n\n── Preview ──\n${output.substring(0, 500)}`,
+      result: `CSV created: ${lines.length} lines (${formatBytes(stat.size)})`,
     }
   } catch (err: any) {
     return { success: false, log: `Failed to create CSV: ${err.message}`, result: '', error: err.message }
@@ -539,8 +567,20 @@ export async function writeRichFile(filePath: string, data: any): Promise<FileRe
 
   switch (ext) {
     case '.xlsx':
-    case '.xls':
-      return writeExcel(filePath, data)
+    case '.xls': {
+      // Normalize: if data doesn't have sheets array, wrap it
+      let excelData = data
+      if (!excelData.sheets || !Array.isArray(excelData.sheets)) {
+        // Maybe LLM sent { name, headers, rows } directly (single sheet)
+        if (excelData.rows || excelData.headers) {
+          excelData = { sheets: [{ name: excelData.name || 'Sheet1', headers: excelData.headers, rows: excelData.rows || [] }] }
+        } else {
+          // Last resort: wrap whatever we have
+          excelData = { sheets: [{ name: 'Sheet1', headers: ['Data'], rows: [[JSON.stringify(data)]] }] }
+        }
+      }
+      return writeExcel(filePath, excelData)
+    }
     case '.docx':
       return writeDocx(filePath, data)
     case '.pdf':

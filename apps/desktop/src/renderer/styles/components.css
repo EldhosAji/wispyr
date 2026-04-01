@@ -560,3 +560,30 @@
   font-size: var(--text-sm);
   max-width: 360px;
 }
+
+/* ═══════════════════════════════════════════════════════
+   Chat UI (Agent mode — Phase A+B)
+   ═══════════════════════════════════════════════════════ */
+
+.chat-entry {
+  margin-bottom: var(--space-2);
+}
+
+.chat-entry .card {
+  animation: fadeSlideIn 0.2s ease-out;
+}
+
+@keyframes fadeSlideIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.cursor-blink {
+  animation: blink 0.8s step-end infinite;
+  color: var(--accent);
+  font-weight: bold;
+}
+
+@keyframes blink {
+  50% { opacity: 0; }
+}
