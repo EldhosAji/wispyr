@@ -461,7 +461,7 @@ export function registerAllIpcHandlers(_mainWindow: BrowserWindow | null): void 
 
   // ─── Providers ───
   ipcMain.handle('providers:list', async () => {
-    const providers = providersStore.getProviders()
+    const providers = providersStore.getProvidersSafe()
     const activeId = providersStore.getActiveProviderId()
     return providers.map((p) => ({
       ...p,
@@ -489,7 +489,7 @@ export function registerAllIpcHandlers(_mainWindow: BrowserWindow | null): void 
       permission: 'auto-approved',
     })
 
-    return { success: true, provider: config }
+    return { success: true, provider: { ...config, apiKey: undefined, hasApiKey: !!config.apiKey } }
   })
 
   ipcMain.handle('providers:remove', async (_event, id: string) => {
@@ -536,7 +536,7 @@ export function registerAllIpcHandlers(_mainWindow: BrowserWindow | null): void 
   ipcMain.handle('providers:getActive', async () => {
     const provider = providersStore.getActiveProvider()
     if (!provider) return null
-    return { ...provider, isActive: true }
+    return { ...provider, apiKey: undefined, hasApiKey: !!provider.apiKey, isActive: true }
   })
 
   // ─── Plugins ───

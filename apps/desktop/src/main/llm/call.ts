@@ -152,7 +152,7 @@ async function callAzureOpenAI(provider: ProviderConfig, messages: LLMMessage[])
 
 // ─── Google Gemini ───
 async function callGemini(provider: ProviderConfig, messages: LLMMessage[]): Promise<LLMResponse> {
-  const apiPath = `/v1beta/models/${provider.model}:generateContent?key=${provider.apiKey || ''}`
+  const apiPath = `/v1beta/models/${provider.model}:generateContent`
 
   const systemMsg = messages.find(m => m.role === 'system')
   const contents = messages.filter(m => m.role !== 'system').map(m => ({
@@ -167,6 +167,7 @@ async function callGemini(provider: ProviderConfig, messages: LLMMessage[]): Pro
 
   return httpRequest(provider.baseUrl, apiPath, body, {
     'content-type': 'application/json',
+    'x-goog-api-key': provider.apiKey || '',
   }, (data) => {
     if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
       return data.candidates[0].content.parts[0].text

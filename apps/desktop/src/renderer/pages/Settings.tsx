@@ -9,7 +9,7 @@ interface Provider {
   type: string
   baseUrl: string
   model: string
-  apiKey?: string
+  hasApiKey?: boolean
   isActive: boolean
 }
 
