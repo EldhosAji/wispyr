@@ -25,7 +25,7 @@ export interface ToolDefinition {
   name: string
   description: string
   parameters: ToolParameter[]
-  permissionLevel: 'read_only' | 'write' | 'destructive'
+  permissionLevel: 'read_only' | 'write' | 'destructive' | 'system'
   concurrencySafe: boolean
   execute: (params: Record<string, any>, context: ToolContext) => Promise<ToolResult>
 }
@@ -53,7 +53,7 @@ export interface ToolCallResult {
   toolCallId: string
   name: string
   result: ToolResult
-  permissionLevel: 'read_only' | 'write' | 'destructive'
+  permissionLevel: 'read_only' | 'write' | 'destructive' | 'system'
 }
 
 // ─── Registry ───
@@ -273,7 +273,20 @@ async function executeSingleTool(
   }
 
   try {
+    // Run pre-hooks (lazy import to avoid circular deps)
+    const { runPreHooks, runPostHooks } = await import('./hooks')
+    const hookResult = await runPreHooks(call.name, call.arguments, context.folder)
+    if (!hookResult.allowed) {
+      const result: ToolResult = { success: false, log: `Blocked by hook: ${hookResult.error}`, result: 'Blocked', error: hookResult.error }
+      onProgress(call.id, 'skipped', result)
+      return { toolCallId: call.id, name: call.name, result, permissionLevel: level }
+    }
+
     const result = await tool.execute(call.arguments, context)
+
+    // Run post-hooks (fire and forget)
+    runPostHooks(call.name, call.arguments, result, context.folder).catch(() => {})
+
     onProgress(call.id, result.success ? 'success' : 'error', result)
     return { toolCallId: call.id, name: call.name, result, permissionLevel: level }
   } catch (err: any) {

@@ -4,6 +4,7 @@
  */
 import { join, extname } from 'path'
 import { readFileSync, writeFileSync, existsSync, statSync, readdirSync } from 'fs'
+import { addChartsToExcel, type ChartDefinition } from './excel-charts'
 
 // ─── Types ───
 export interface FileResult {
@@ -25,7 +26,7 @@ function formatBytes(bytes: number): string {
 // EXCEL (.xlsx, .xls)
 // ═══════════════════════════════════════════════
 
-export async function writeExcel(filePath: string, data: { sheets: Array<{ name: string; headers?: string[]; rows: any[][] }> }): Promise<FileResult> {
+export async function writeExcel(filePath: string, data: { sheets: Array<{ name: string; headers?: string[]; rows: any[][] }>; charts?: ChartDefinition[] }): Promise<FileResult> {
   try {
     const ExcelJS = require('exceljs')
     const workbook = new ExcelJS.Workbook()
@@ -80,12 +81,24 @@ export async function writeExcel(filePath: string, data: { sheets: Array<{ name:
     }
 
     await workbook.xlsx.writeFile(filePath)
+
+    // Inject charts if requested (ExcelJS can't create charts, so we use Open XML injection)
+    let chartInfo = ''
+    if (data.charts && data.charts.length > 0) {
+      try {
+        addChartsToExcel(filePath, data.charts)
+        chartInfo = `, ${data.charts.length} chart(s) added`
+      } catch (chartErr: any) {
+        chartInfo = ` (chart injection failed: ${chartErr.message})`
+      }
+    }
+
     const stat = statSync(filePath)
-    const totalRows = data.sheets.reduce((sum, s) => sum + s.rows.length, 0)
+    const totalRows = data.sheets.reduce((sum, s) => sum + (s.rows?.length || 0), 0)
 
     return {
       success: true,
-      log: `Created Excel: ${filePath}\nSize: ${formatBytes(stat.size)}\nSheets: ${data.sheets.map(s => `${s.name} (${s.rows.length} rows × ${s.headers.length} cols)`).join(', ')}`,
+      log: `Created Excel: ${filePath}\nSize: ${formatBytes(stat.size)}\nSheets: ${data.sheets.map(s => `${s.name} (${(s.rows?.length || 0)} rows)`).join(', ')}${chartInfo}`,
       result: `Excel created: ${data.sheets.length} sheets, ${totalRows} total rows (${formatBytes(stat.size)})`,
     }
   } catch (err: any) {

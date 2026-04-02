@@ -11,11 +11,11 @@ export function registerFilesystemTools(): void {
   // ─── write_file ───
   registerTool({
     name: 'write_file',
-    description: 'Create or overwrite a file. Use "content" for text files, "data" for binary files (.xlsx, .docx, .pdf, .pptx).',
+    description: 'Create any file. Use "content" for text files, "data" for .xlsx/.docx/.pdf/.pptx/.csv.',
     parameters: [
-      { name: 'fileName', type: 'string', description: 'File name to create', required: true },
-      { name: 'content', type: 'string', description: 'Text content (for .txt, .md, .json, .csv, .html, etc.)', required: false },
-      { name: 'data', type: 'object', description: 'Structured JSON for binary files. Excel: {sheets:[{name,headers,rows}]}. Word: {title,content:[{type,text}]}. PDF: {title,content:[{type,text}]}. PPTX: {slides:[{title,bullets}]}', required: false },
+      { name: 'fileName', type: 'string', description: 'File name with extension', required: true },
+      { name: 'content', type: 'string', description: 'Text content for .txt .md .json .html etc', required: false },
+      { name: 'data', type: 'object', description: 'Structured JSON for binary files (see system prompt for format)', required: false },
     ],
     permissionLevel: 'write',
     concurrencySafe: false,

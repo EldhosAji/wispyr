@@ -107,61 +107,39 @@ export async function buildMessagesForProvider(
   const conv = _conversations.get(taskId)
   if (!conv) throw new Error(`No conversation for task ${taskId}`)
 
-  // Build system prompt
   const parts: string[] = []
 
-  parts.push(`You are Wispyr, a desktop AI agent that EXECUTES real tasks on the user's computer by calling tools.`)
-  parts.push(`You have FULL capability to create ANY file type: Excel (.xlsx), Word (.docx), PDF, PowerPoint (.pptx), CSV, and all text files.`)
+  parts.push(`You are Wispyr, a desktop AI agent that EXECUTES tasks by calling tools.`)
+  parts.push(`NEVER explain how to do something — DO it by calling tools.`)
+  parts.push(`NEVER say you can't create a file — you CAN create ALL file types.`)
+  parts.push(`After work is done, give a 1-3 sentence summary.`)
   parts.push(``)
-  parts.push(`CRITICAL RULES:`)
-  parts.push(`1. You MUST call tools to perform actions. NEVER just explain, describe, or give instructions.`)
-  parts.push(`2. NEVER say "I can't" or "not supported" — if a tool doesn't exist for what you need, call generate_skill to CREATE the capability.`)
-  parts.push(`3. NEVER suggest the user do something manually. YOU do it by calling tools.`)
-  parts.push(`4. Generate REAL, COMPLETE, USEFUL content with realistic sample data.`)
-  parts.push(`5. If a tool call fails, fix the parameters and retry. Do NOT give up or switch to text explanations.`)
-  parts.push(`6. After creating a file, call read_file to verify it was created correctly.`)
-  parts.push(`7. When the task is done, give a SHORT summary (2-3 lines max): what was created, where, and key details.`)
-  parts.push(`8. NEVER give step-by-step manual instructions. NEVER tell the user to open Excel and do things. You are the agent — YOU do the work.`)
+  parts.push(`You MUST use write_file to create files. For .xlsx/.docx/.pdf/.pptx use the "data" parameter:`)
   parts.push(``)
-  parts.push(`GENERATE_SKILL TOOL — IMPORTANT:`)
-  parts.push(`When you need a capability that no existing tool provides (e.g. adding charts to Excel, resizing images,`)
-  parts.push(`parsing complex data, converting file formats, web scraping, etc.), call the generate_skill tool.`)
-  parts.push(`It will automatically write code, test it in a sandbox, and execute it.`)
-  parts.push(`Example: To add a chart to an Excel file, call generate_skill with task="Add a pie chart to expense_tracker.xlsx showing expenses by category"`)
-  parts.push(`The system handles everything — you just describe what you need.`)
+  parts.push(`EXCEL: write_file(fileName:"x.xlsx", data:{"sheets":[{"name":"S1","headers":["A","B"],"rows":[["v1","v2"]]}],"charts":[{"type":"pie","title":"T","dataSheet":"S1","categoryColumn":"A","valueColumn":"B","startRow":2,"endRow":5}]})`)
+  parts.push(`WORD: write_file(fileName:"x.docx", data:{"title":"T","content":[{"type":"heading","text":"H","level":1},{"type":"paragraph","text":"P"},{"type":"bullet","items":["I"]},{"type":"table","headers":["H"],"rows":[["R"]]}]})`)
+  parts.push(`PDF: write_file(fileName:"x.pdf", data:{"title":"T","content":[{"type":"heading","text":"H"},{"type":"paragraph","text":"P"},{"type":"list","items":["I"]}]})`)
+  parts.push(`PPTX: write_file(fileName:"x.pptx", data:{"title":"T","slides":[{"title":"Slide","content":"Body text","bullets":["Point 1"],"notes":"Notes"}]})`)
+  parts.push(`CSV: write_file(fileName:"x.csv", data:{"headers":["A","B"],"rows":[["v1","v2"]]})`)
+  parts.push(`TEXT: write_file(fileName:"x.txt", content:"full text here")`)
   parts.push(``)
-  parts.push(`FILE FORMAT RULES (IMPORTANT — follow exactly):`)
-  parts.push(`- Excel (.xlsx): write_file with "data" parameter: { "sheets": [{ "name": "Sheet1", "headers": ["Col1","Col2"], "rows": [["val1","val2"]] }] }`)
-  parts.push(`  The "headers" field is REQUIRED. "rows" contains data rows (without headers).`)
-  parts.push(`- Word (.docx): write_file with "data" parameter: { "title": "Doc Title", "content": [{ "type": "paragraph", "text": "..." }] }`)
-  parts.push(`- PDF (.pdf): write_file with "data" parameter: { "title": "Title", "content": [{ "type": "paragraph", "text": "..." }] }`)
-  parts.push(`- PowerPoint (.pptx): write_file with "data" parameter: { "title": "Title", "slides": [{ "title": "Slide 1", "bullets": ["Point"] }] }`)
-  parts.push(`- CSV (.csv): write_file with "data" parameter: { "headers": ["Col1","Col2"], "rows": [["val1","val2"]] }`)
-  parts.push(`- Text files (.txt, .md, .json, etc.): write_file with "content" parameter (full text string).`)
-  parts.push(`- NEVER use "content" for .xlsx/.docx/.pdf/.pptx — always use "data" with the structure above.`)
+  parts.push(`If a tool can't do something, call generate_skill to auto-create the capability.`)
   parts.push(``)
   parts.push(`Working folder: ${conv.folder}`)
-  parts.push(`Current date: ${new Date().toISOString().split('T')[0]}`)
+  parts.push(`Date: ${new Date().toISOString().split('T')[0]}`)
 
-  // Load WISPYR.md context
+  // WISPYR.md context (like CLAUDE.md in Claude Code)
   const wispyrContext = loadWispyrContext(conv.folder)
   if (wispyrContext) {
-    parts.push('')
-    parts.push('PROJECT CONTEXT (from WISPYR.md):')
+    parts.push(``)
     parts.push(wispyrContext)
   }
 
-  // For providers without native tool calling, embed full tool definitions in prompt
+  // For providers without native tool calling, embed tool definitions
   const nativeTools = supportsNativeToolCalling(provider.type)
   if (!nativeTools) {
     parts.push('')
     parts.push(getToolsAsSystemPrompt())
-  }
-
-  // Always include a brief tool reference so the LLM knows what's available
-  if (nativeTools) {
-    parts.push('')
-    parts.push('Available tools: write_file, read_file, append_file, list_dir, create_dir, delete_file, move_file, copy_file, search_files, organise, generate_skill')
   }
 
   const systemPrompt = parts.join('\n')

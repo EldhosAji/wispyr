@@ -82,6 +82,30 @@ const api = {
     save: (w: any) => ipcRenderer.invoke('workflows:save', w),
     delete: (id: string) => ipcRenderer.invoke('workflows:delete', id),
     import: (filePath?: string) => ipcRenderer.invoke('workflows:import', filePath),
+    onProgress: (cb: (data: any) => void) => {
+      const listener = (_: any, d: any) => cb(d)
+      ipcRenderer.on('workflow:progress', listener)
+      return () => { ipcRenderer.removeListener('workflow:progress', listener) }
+    },
+  },
+
+  hooks: {
+    list: () => ipcRenderer.invoke('hooks:list'),
+    add: (hook: any) => ipcRenderer.invoke('hooks:add', hook),
+    remove: (id: string) => ipcRenderer.invoke('hooks:remove', id),
+    toggle: (id: string, enabled: boolean) => ipcRenderer.invoke('hooks:toggle', id, enabled),
+  },
+
+  mcp: {
+    connect: (config: any) => ipcRenderer.invoke('mcp:connect', config),
+    disconnect: (name: string) => ipcRenderer.invoke('mcp:disconnect', name),
+    servers: () => ipcRenderer.invoke('mcp:servers'),
+  },
+
+  scheduler: {
+    list: () => ipcRenderer.invoke('scheduler:list'),
+    remove: (nameOrId: string) => ipcRenderer.invoke('scheduler:remove', nameOrId),
+    toggle: (id: string, enabled: boolean) => ipcRenderer.invoke('scheduler:toggle', id, enabled),
   },
 
   audit: {

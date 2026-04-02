@@ -667,6 +667,8 @@ function httpRequestSSE(
             console.log(`[SSE] Raw chunk (${chunkStr.length} chars): ${chunkStr.substring(0, 200).replace(/\n/g, '\\n')}`)
           }
           buffer += chunkStr
+          // Normalize line endings (Azure uses \r\n, others use \n)
+          buffer = buffer.replace(/\r\n/g, '\n')
           const parts = buffer.split('\n\n')
           buffer = parts.pop() || ''
 
@@ -675,9 +677,10 @@ function httpRequestSSE(
             let eventData = ''
 
             for (const line of part.split('\n')) {
-              if (line.startsWith('event: ')) eventName = line.slice(7).trim()
-              else if (line.startsWith('data: ')) eventData += line.slice(6)
-              else if (line.startsWith('data:')) eventData += line.slice(5)
+              const trimmedLine = line.trim()
+              if (trimmedLine.startsWith('event: ')) eventName = trimmedLine.slice(7).trim()
+              else if (trimmedLine.startsWith('data: ')) eventData += trimmedLine.slice(6)
+              else if (trimmedLine.startsWith('data:')) eventData += trimmedLine.slice(5)
             }
 
             if (!eventData.trim()) continue
@@ -717,10 +720,30 @@ function httpRequestSSE(
         })
 
         res.on('end', () => {
-          console.log(`[SSE] Stream ended. Total raw data: ${rawDataSize} chars, collected events: ${collectedEvents.length}, fullContent: ${fullContent.length} chars, remaining buffer: ${buffer.length} chars`)
+          // Process any remaining data in buffer
           if (buffer.trim()) {
-            console.log(`[SSE] Remaining buffer content: ${buffer.substring(0, 300).replace(/\n/g, '\\n')}`)
+            const remaining = buffer.replace(/\r\n/g, '\n')
+            for (const line of remaining.split('\n')) {
+              const trimmedLine = line.trim()
+              if (trimmedLine.startsWith('data: ')) {
+                const data = trimmedLine.slice(6).trim()
+                if (data === '[DONE]') continue
+                try {
+                  const parsed = JSON.parse(data)
+                  collectedEvents.push(parsed)
+                  onEvent('message', parsed)
+                  if (parsed.choices?.[0]?.delta?.content) {
+                    fullContent += parsed.choices[0].delta.content
+                  }
+                  if (parsed.delta?.type === 'text_delta') {
+                    fullContent += parsed.delta.text || ''
+                  }
+                } catch { /* skip */ }
+              }
+            }
           }
+
+          console.log(`[SSE] Stream ended. ${rawDataSize} chars, ${collectedEvents.length} events, ${fullContent.length} chars content`)
 
           // Finalize tool calls from buffers
           for (const tc of toolCallBuffers.values()) {

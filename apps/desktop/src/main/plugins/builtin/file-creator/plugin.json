@@ -1,0 +1,6 @@
+{
+  "name": "file-creator",
+  "version": "1.0.0",
+  "description": "Create files (Excel, Word, PDF, PowerPoint, CSV) with rich formatting",
+  "author": "Wispyr"
+}

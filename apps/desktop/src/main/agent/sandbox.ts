@@ -78,6 +78,21 @@ function buildWorkerScript(userCode: string, folder: string, args: Record<string
   const safeFolderPath = JSON.stringify(resolve(folder))
   const safeArgs = JSON.stringify(args)
 
+  // Find the app's node_modules so require() works from the sandbox
+  // In dev: apps/desktop/node_modules, In prod: resources/app/node_modules
+  let appRoot = resolve(__dirname, '..', '..')
+  // Walk up until we find node_modules
+  let searchDir = appRoot
+  for (let i = 0; i < 5; i++) {
+    const nmPath = resolve(searchDir, 'node_modules')
+    if (require('fs').existsSync(nmPath)) {
+      appRoot = searchDir
+      break
+    }
+    searchDir = resolve(searchDir, '..')
+  }
+  const safeAppRoot = JSON.stringify(resolve(appRoot, 'package.json'))
+
   return `
 import { parentPort } from 'worker_threads';
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync, renameSync, copyFileSync, unlinkSync, createWriteStream } from 'fs';
@@ -96,8 +111,8 @@ function scopedPath(filePath) {
   return normalized;
 }
 
-// ─── Whitelisted require() for safe npm packages ───
-const _require = createRequire(import.meta.url);
+// ─── Whitelisted require() — resolves from app's node_modules ───
+const _require = createRequire(${safeAppRoot});
 const ALLOWED_MODULES = new Set([
   'exceljs', 'docx', 'pdfkit', 'pptxgenjs',
   'csv-stringify', 'csv-stringify/sync', 'csv-parse', 'csv-parse/sync',

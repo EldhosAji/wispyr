@@ -13,6 +13,10 @@ import { initializeAgent } from '../agent/init'
 import { runAgent, cleanupTask, type AgentEvent } from '../agent/engine'
 import { fallbackParse } from '../agent/task-parser'
 import { getTaskCost, getSessionCost, formatCost, formatTokens } from '../agent/cost-tracker'
+import { getHooks, addHook, removeHook, toggleHook } from '../agent/hooks'
+import { connectMCPServer, disconnectMCPServer, getConnectedServers } from '../mcp/client'
+import { getScheduledTasks, removeScheduledTask, toggleScheduledTask } from '../agent/scheduler'
+import { runWorkflow, type WorkflowProgressCallback } from '../agent/workflow-runner'
 import { getTool } from '../agent/tool-registry'
 import * as fsSkill from '../skills/filesystem.skill'
 import * as fileHandlers from '../skills/filehandlers'
@@ -583,9 +587,20 @@ export function registerAllIpcHandlers(_mainWindow: BrowserWindow | null): void 
   ipcMain.handle('workflows:run', async (_event, id: string, inputs: any) => {
     const workflow = workflowsStore.getWorkflow(id)
     if (!workflow) return { success: false, error: 'Workflow not found' }
+
+    const folder = settingsStore.getSettings().defaultFolder || app.getPath('home')
     workflowsStore.saveWorkflow({ ...workflow, lastRun: new Date().toISOString() })
     auditStore.appendAudit({ skill: 'workflows', action: 'workflow_run', params: JSON.stringify({ workflowId: id, name: workflow.name, inputs }), permission: 'auto-approved' })
-    return { success: true }
+
+    const mainWindow = getMainWindow()
+    // Run workflow with progress events
+    const result = await runWorkflow(workflow, inputs || {}, folder, (event) => {
+      if (mainWindow) {
+        mainWindow.webContents.send('workflow:progress', { workflowId: id, ...event })
+      }
+    })
+
+    return { success: result.success, stepResults: result.stepResults, error: result.error }
   })
 
   ipcMain.handle('workflows:save', async (_event, workflow: any) => {
@@ -673,6 +688,43 @@ export function registerAllIpcHandlers(_mainWindow: BrowserWindow | null): void 
     else win?.maximize()
   })
   ipcMain.handle('window:close', async (event) => { BrowserWindow.fromWebContents(event.sender)?.close() })
+
+  // ═══════════════════════════════════════════════
+  // HOOKS
+  // ═══════════════════════════════════════════════
+
+  ipcMain.handle('hooks:list', async () => getHooks())
+  ipcMain.handle('hooks:add', async (_event, hook: any) => {
+    return addHook({ name: hook.name, event: hook.event, timing: hook.timing, action: hook.action, enabled: true, blocking: hook.blocking })
+  })
+  ipcMain.handle('hooks:remove', async (_event, id: string) => ({ success: removeHook(id) }))
+  ipcMain.handle('hooks:toggle', async (_event, id: string, enabled: boolean) => ({ success: toggleHook(id, enabled) }))
+
+  // ═══════════════════════════════════════════════
+  // MCP
+  // ═══════════════════════════════════════════════
+
+  ipcMain.handle('mcp:connect', async (_event, config: any) => {
+    try {
+      const tools = await connectMCPServer(config)
+      return { success: true, tools: tools.map(t => ({ name: t.name, description: t.description })) }
+    } catch (err: any) {
+      return { success: false, error: err.message }
+    }
+  })
+  ipcMain.handle('mcp:disconnect', async (_event, name: string) => {
+    disconnectMCPServer(name)
+    return { success: true }
+  })
+  ipcMain.handle('mcp:servers', async () => getConnectedServers())
+
+  // ═══════════════════════════════════════════════
+  // SCHEDULER
+  // ═══════════════════════════════════════════════
+
+  ipcMain.handle('scheduler:list', async () => getScheduledTasks())
+  ipcMain.handle('scheduler:remove', async (_event, nameOrId: string) => ({ success: removeScheduledTask(nameOrId) }))
+  ipcMain.handle('scheduler:toggle', async (_event, id: string, enabled: boolean) => ({ success: toggleScheduledTask(id, enabled) }))
 }
 
 // ═══════════════════════════════════════════════
